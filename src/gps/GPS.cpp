@@ -717,6 +717,8 @@ bool GPS::setup()
                 SEND_UBX_PACKET(0x06, 0x39, _message_JAM_6_7, "enable interference resistance", 500);
                 SEND_UBX_PACKET(0x06, 0x23, _message_NAVX5, "configure NAVX5 settings", 500);
             }
+
+
             // Turn off unwanted NMEA messages, set update rate
             SEND_UBX_PACKET(0x06, 0x08, _message_1HZ, "set GPS update rate", 500);
             SEND_UBX_PACKET(0x06, 0x01, _message_GLL, "disable NMEA GLL", 500);

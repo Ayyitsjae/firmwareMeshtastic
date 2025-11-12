@@ -424,6 +424,7 @@ int32_t PositionModule::runOnce()
             lastGpsLongitude = node->position.longitude_i;
 
             sendOurPosition();
+            
             if (config.device.role == meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND) {
                 sendLostAndFoundText();
             }
@@ -486,7 +487,39 @@ struct SmartPosition PositionModule::getDistanceTraveledSinceLastSend(meshtastic
                          .distanceThreshold = distanceTravelThreshold,
                          .hasTraveledOverThreshold = abs(distanceTraveledSinceLastSend) >= distanceTravelThreshold};
 }
+void PositionModule::sendGeoText(NodeNum dest, uint8_t channel)
+{
+    // Respect airtime utilization, same idea as RangeTest’s guard
+    if (!airTime->isTxAllowedChannelUtil(true)) return;
 
+    // Require a valid position
+    if (localPosition.latitude_i == 0 || localPosition.longitude_i == 0) return;
+
+    // Allocate a generic data packet (like RangeTest)
+    meshtastic_MeshPacket *p = allocDataPacket();
+    p->to = dest;
+    p->decoded.want_response = false;
+    p->hop_limit = 0;
+    p->want_ack = false;
+    p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP; // show up in chat
+
+    // Make it explicit we're using the primary channel (0)
+    p->channel = channel; // 0 == primary
+
+    // Format: “LAT 12.3456789, LON -98.7654321, ALT 123m”
+    static char msg[MAX_LORA_PAYLOAD_LEN + 1];
+    const double lat = localPosition.latitude_i  * 1e-7;
+    const double lon = localPosition.longitude_i * 1e-7;
+    const int32_t alt = (localPosition.has_altitude_hae && localPosition.altitude_hae) ? 
+                          localPosition.altitude_hae :
+                          localPosition.altitude; // fall back if needed
+    snprintf(msg, sizeof(msg), "LAT %.7f, LON %.7f, ALT %dm", lat, lon, alt);
+
+    p->decoded.payload.size = strlen(msg);
+    memcpy(p->decoded.payload.bytes, msg, p->decoded.payload.size);
+
+    service->sendToMesh(p, RX_SRC_LOCAL, true);
+}
 void PositionModule::handleNewPosition()
 {
     meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(nodeDB->getNodeNum());
