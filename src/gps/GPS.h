@@ -88,6 +88,10 @@ class GPS : private concurrency::OSThread
     // re-enable the thread
     void enable();
 
+        bool updateDynamicModelFromNav5();
+    uint8_t getDynamicModel() const { return dynModel; }
+    const char *getDynamicModelString() const;
+
     // Disable the thread
     int32_t disable() override;
 
@@ -122,6 +126,7 @@ class GPS : private concurrency::OSThread
     void down();
 
   private:
+      uint8_t dynModel = 0xFF; // 0xFF = unknown / not read yet
     GPS() : concurrency::OSThread("GPS") {}
 
     /// Record that we have a GPS

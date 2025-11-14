@@ -489,6 +489,52 @@ static const int rareSerialSpeeds[3] = {4800, 57600, GPS_BAUDRATE};
  *  to known GPS responses.
  * @retval Whether setup reached the end of its potential to configure the GPS.
  */
+bool GPS::updateDynamicModelFromNav5()
+{
+    // Poll packet for UBX-CFG-NAV5 (no payload)
+    uint8_t pollNAV5[] = {
+        0xB5, 0x62, // sync chars
+        0x06, 0x24, // class = CFG (0x06), id = NAV5 (0x24)
+        0x00, 0x00, // length = 0 for poll
+        0x00, 0x00  // checksum placeholder
+    };
+
+    UBXChecksum(pollNAV5, sizeof(pollNAV5));
+    clearBuffer();
+    _serial_gps->write(pollNAV5, sizeof(pollNAV5));
+
+    uint8_t buffer[64] = {0};
+
+    // This will read back the UBX-CFG-NAV5 response payload
+    int len = getACK(buffer, sizeof(buffer), 0x06, 0x24, 1000);
+    if (len < 4) {
+        LOG_WARN("Failed to read NAV5 payload, len=%d", len);
+        return false;
+    }
+
+    // Payload layout: mask(2), dynModel(1), fixMode(1), ...
+    dynModel = buffer[2];
+    uint8_t fixMode = buffer[3];
+
+    LOG_INFO("UBlox NAV5: dynModel=0x%02X, fixMode=0x%02X", dynModel, fixMode);
+    return true;
+}
+const char *GPS::getDynamicModelString() const
+{
+    switch (dynModel) {
+    case 0:  return "Portable";
+    case 2:  return "Stationary";
+    case 3:  return "Pedestrian";
+    case 4:  return "Automotive";
+    case 5:  return "Sea";
+    case 6:  return "Airborne <1g";
+    case 7:  return "Airborne <2g";
+    case 8:  return "Airborne <4g";
+    default: return "Unknown";
+    }
+}
+
+
 bool GPS::setup()
 {
     if (!didSerialInit) {
@@ -657,6 +703,13 @@ bool GPS::setup()
             SEND_UBX_PACKET(0x06, 0x02, _message_DISABLE_TXT_INFO, "disable text info messages", 500);
             SEND_UBX_PACKET(0x06, 0x39, _message_JAM_6_7, "enable interference resistance", 500);
             SEND_UBX_PACKET(0x06, 0x23, _message_NAVX5, "configure NAVX5 settings", 500);
+            SEND_UBX_PACKET(0x06, 0x24, _message_CFG_NAV5, "set dynamic platform model to Airborne <4g", 500);
+             if (!updateDynamicModelFromNav5()) {
+        LOG_WARN("Unable to verify UBlox dynModel");
+    } else {
+        LOG_INFO("UBlox dynModel verified as %s (0x%02X)",
+                 getDynamicModelString(), getDynamicModel());
+    }
 
             // Turn off unwanted NMEA messages, set update rate
             SEND_UBX_PACKET(0x06, 0x08, _message_1HZ, "set GPS update rate", 500);

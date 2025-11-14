@@ -120,6 +120,7 @@ void PositionModule::alterReceivedProtobuf(meshtastic_MeshPacket &mp, meshtastic
             pb_encode_to_bytes(mp.decoded.payload.bytes, sizeof(mp.decoded.payload.bytes), &meshtastic_Position_msg, p);
     }
 }
+extern GPS *gps;
 
 void PositionModule::trySetRtc(meshtastic_Position p, bool isLocal, bool forceUpdate)
 {
@@ -369,8 +370,11 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
         p->priority = meshtastic_MeshPacket_Priority_BACKGROUND;
     prevPacketId = p->id;
 
-    if (channel > 0)
-        p->channel = channel;
+if (channel == 0)
+    p->channel = 0;
+else
+    p->channel = channel;
+
 
     service->sendToMesh(p, RX_SRC_LOCAL, true);
 
@@ -424,7 +428,13 @@ int32_t PositionModule::runOnce()
             lastGpsLongitude = node->position.longitude_i;
 
             sendOurPosition();
-            
+               // NEW: send human-readable position + GPS debug to primary chat channel (0),
+        // but not more often than geoTextMinIntervalMs
+        if (now - lastGeoTextMs >= geoTextMinIntervalMs) {
+            sendGeoText(NODENUM_BROADCAST, 0);      // lat/lon/alt + dyn model
+            sendGpsDebugText(NODENUM_BROADCAST, 0); // fix quality, etc. (see below)
+            lastGeoTextMs = now;
+        }
             if (config.device.role == meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND) {
                 sendLostAndFoundText();
             }
@@ -506,20 +516,78 @@ void PositionModule::sendGeoText(NodeNum dest, uint8_t channel)
     // Make it explicit we're using the primary channel (0)
     p->channel = channel; // 0 == primary
 
-    // Format: “LAT 12.3456789, LON -98.7654321, ALT 123m”
     static char msg[MAX_LORA_PAYLOAD_LEN + 1];
+
     const double lat = localPosition.latitude_i  * 1e-7;
     const double lon = localPosition.longitude_i * 1e-7;
-    const int32_t alt = (localPosition.has_altitude_hae && localPosition.altitude_hae) ? 
+    const int32_t alt = (localPosition.has_altitude_hae && localPosition.altitude_hae) ?
                           localPosition.altitude_hae :
                           localPosition.altitude; // fall back if needed
-    snprintf(msg, sizeof(msg), "LAT %.7f, LON %.7f, ALT %dm", lat, lon, alt);
+
+    // 🔽 Get dynamic model info from GPS (if available)
+    const char *dynStr = "Unknown";
+    uint8_t dynCode = 0xFF;
+
+    if (gps) {
+        dynStr  = gps->getDynamicModelString();
+        dynCode = gps->getDynamicModel();
+    }
+
+    // Example format:
+    // "LAT 12.3456789, LON -98.7654321, ALT 123m, DYN Airborne<4g> (0x08)"
+    snprintf(msg, sizeof(msg),
+             "LAT %.7f, LON %.7f, ALT %dm, DYN %s (0x%02X)",
+             lat, lon, alt, dynStr, dynCode);
 
     p->decoded.payload.size = strlen(msg);
     memcpy(p->decoded.payload.bytes, msg, p->decoded.payload.size);
 
     service->sendToMesh(p, RX_SRC_LOCAL, true);
 }
+void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
+{
+    // Need a GPS object and a known position
+    if (!gps) return;
+
+    uint32_t now = millis();
+    if (lastGpsDbgMs && (now - lastGpsDbgMs) < gpsDbgMinIntervalMs) {
+        // Too soon since last GPS debug — throttle
+        return;
+    }
+    lastGpsDbgMs = now;
+
+    // Build the packet
+    meshtastic_MeshPacket *p = allocDataPacket();
+    if (!p) return;
+
+    p->to = dest;
+    p->decoded.want_response = false;
+    p->hop_limit = 0;
+    p->want_ack = false;
+    p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+    p->channel = channel; // 0 = primary chat
+
+    static char msg[MAX_LORA_PAYLOAD_LEN + 1];
+
+    // Fix quality / sats / DOP come from the Position struct that GPS is filling
+    uint8_t fixQ = localPosition.fix_quality;      // 0–5 depending on GPS
+    uint8_t sats = localPosition.sats_in_view;     // satellites
+    uint16_t pdop = localPosition.PDOP;            // PDOP * 10 typically
+
+    const char *dynStr = gps->getDynamicModelString();
+    uint8_t dynCode   = gps->getDynamicModel();
+
+    snprintf(msg, sizeof(msg),
+             "GPS: fixQ=%u, sats=%u, PDOP=%u, DYN=%s (0x%02X)",
+             fixQ, sats, pdop, dynStr, dynCode);
+
+    p->decoded.payload.size = strlen(msg);
+    memcpy(p->decoded.payload.bytes, msg, p->decoded.payload.size);
+
+    service->sendToMesh(p, RX_SRC_LOCAL, true);
+}
+
+
 void PositionModule::handleNewPosition()
 {
     meshtastic_NodeInfoLite *node = nodeDB->getMeshNode(nodeDB->getNodeNum());

@@ -55,6 +55,7 @@ class PositionModule : public ProtobufModule<meshtastic_Position>, private concu
     virtual int32_t runOnce() override;
 
   private:
+  
     meshtastic_MeshPacket *allocPositionPacket();
     struct SmartPosition getDistanceTraveledSinceLastSend(meshtastic_PositionLite currentPosition);
     meshtastic_MeshPacket *allocAtakPli();
@@ -65,10 +66,10 @@ class PositionModule : public ProtobufModule<meshtastic_Position>, private concu
     bool hasGPS();
     uint32_t lastSentReply = 0; // Last time we sent a position reply (used for reply throttling only)
     uint32_t lastGeoTextMs = 0;
-static constexpr uint32_t geoTextMinIntervalMs = 30 * 1000; // 30s (tune me)
+static constexpr uint32_t geoTextMinIntervalMs = 60 * 1000; // 30s (tune me)
 void sendGeoText(NodeNum dest = NODENUM_BROADCAST, uint8_t channel = 0); 
 uint32_t lastGpsDbgMs = 0;
-static constexpr uint32_t gpsDbgMinIntervalMs = 60 * 1000; // 60s; tune as you like
+static constexpr uint32_t gpsDbgMinIntervalMs = 120 * 1000; // 60s; tune as you like
 void sendGpsDebugText(NodeNum dest = NODENUM_BROADCAST, uint8_t channel = 0);
 const char* dynModelToStr(int dm); // helper
 

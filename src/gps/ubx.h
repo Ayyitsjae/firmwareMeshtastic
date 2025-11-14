@@ -152,7 +152,7 @@ static const uint8_t _message_NAVX5[] = {
     0x00,                   // iniFix3D (Initial fix must be 3D) (0 = false 1 = true)
     0x00,                   // Reserved 6
     0x00,                   // Reserved 7
-    0x00,                   // Reserved 8
+    0x00,                   // Reserved 
     0x00, 0x00,             // wknRollover 0 = firmware default
     0x00, 0x00, 0x00, 0x00, // Reserved 9
     0x00,                   // Reserved 10
@@ -167,6 +167,24 @@ static const uint8_t _message_NAVX5[] = {
     0x00, 0x00,             // Reserved 3
     0x00, 0x00, 0x00, 0x00  // Reserved 4
 };
+static const uint8_t _message_CFG_NAV5[] PROGMEM = {
+    0x01, 0x00, // mask: apply dynModel only
+    0x08,       // dynModel: Airborne < 4g
+    0x03,       // fixMode: Auto 2D/3D
+    0x00, 0x00, 0x00, 0x00, // fixedAlt
+    0x00, 0x00, 0x00, 0x00, // fixedAltVar
+    0x00,       // minElev
+    0x00,       // drLimit
+    0x00, 0x00, // pDop
+    0x00, 0x00, // tDop
+    0x00, 0x00, // pAcc
+    0x00, 0x00, // tAcc
+    0x00,       // staticHoldThresh
+    0x00,       // dgpsTimeOut
+    0x00, 0x00, 0x00, 0x00, // reserved2
+    0x00, 0x00, 0x00, 0x00, // reserved3
+    0x00, 0x00, 0x00, 0x00  // reserved4
+}; 
 // For the M8
 static const uint8_t _message_NAVX5_8[] = {
     0x02, 0x00,             // msgVer (2 for this version)
