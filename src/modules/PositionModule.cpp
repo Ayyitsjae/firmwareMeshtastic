@@ -17,6 +17,7 @@
 #include "sleep.h"
 #include "target_specific.h"
 #include <Throttle.h>
+#include "SDLogger.h"
 
 PositionModule *positionModule;
 
@@ -330,6 +331,7 @@ meshtastic_MeshPacket *PositionModule::allocAtakPli()
 
 void PositionModule::sendOurPosition()
 {
+    SDLogger::begin(); 
     bool requestReplies = currentGeneration != radioGeneration;
     currentGeneration = radioGeneration;
 
@@ -350,7 +352,7 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
     if (prevPacketId) // if we wrap around to zero, we'll simply fail to cancel in that rare case (no big deal)
         service->cancelSending(prevPacketId);
 
-    // Set's the class precision value for this particular packet
+    // Set the class precision value for this particular packet
     if (channels.getByIndex(channel).settings.has_module_settings) {
         precision = channels.getByIndex(channel).settings.module_settings.position_precision;
     }
@@ -370,11 +372,28 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
         p->priority = meshtastic_MeshPacket_Priority_BACKGROUND;
     prevPacketId = p->id;
 
-if (channel == 0)
-    p->channel = 0;
-else
-    p->channel = channel;
+    // ---------- NEW: log to SD card ----------
+    SDGpsFix fix{};
+    fix.lat_i = localPosition.latitude_i;
+    fix.lon_i = localPosition.longitude_i;
 
+    // Use HAE altitude if present, otherwise MSL altitude
+    if (localPosition.has_altitude_hae && localPosition.altitude_hae) {
+        fix.alt_m = localPosition.altitude_hae;
+    } else {
+        fix.alt_m = localPosition.altitude;
+    }
+
+    fix.sats     = localPosition.sats_in_view;
+    fix.unixTime = localPosition.time;   // this is already set in allocPositionPacket() using RTC/GPS time or 0
+
+    SDLogger::log(fix);
+    // -----------------------------------------
+
+    if (channel == 0)
+        p->channel = 0;
+    else
+        p->channel = channel;
 
     service->sendToMesh(p, RX_SRC_LOCAL, true);
 
@@ -524,7 +543,7 @@ void PositionModule::sendGeoText(NodeNum dest, uint8_t channel)
                           localPosition.altitude_hae :
                           localPosition.altitude; // fall back if needed
 
-    // 🔽 Get dynamic model info from GPS (if available)
+    //  Get dynamic model info from GPS (if available)
     const char *dynStr = "Unknown";
     uint8_t dynCode = 0xFF;
 
@@ -578,8 +597,8 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     uint8_t dynCode   = gps->getDynamicModel();
 
     snprintf(msg, sizeof(msg),
-             "GPS: fixQ=%u, sats=%u, PDOP=%u, DYN=%s (0x%02X)",
-             fixQ, sats, pdop, dynStr, dynCode);
+             "GPS: fixQ=%u, sats=%u, PDOP=%u",
+             fixQ, sats, pdop);
 
     p->decoded.payload.size = strlen(msg);
     memcpy(p->decoded.payload.bytes, msg, p->decoded.payload.size);
