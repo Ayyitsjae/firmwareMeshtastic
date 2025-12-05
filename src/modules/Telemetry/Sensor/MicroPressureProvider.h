@@ -2,17 +2,19 @@
 #include <Arduino.h>
 #include <Wire.h>
 #include "modules/SDLogger.h"
-#include "SparkFun_MicroPressure.h"  // your driver
+#include "SparkFun_MicroPressure.h"  // your driver (DEFAULT_ADDRESS, BUSY_FLAG, etc.)
 
 namespace MicroPressureProvider
 {
-    // Initialize the sensor. Returns true if ready.
-    // addr: default 0x18 for this device
+    // Initialize sensor (gauge, default addr 0x18). Idempotent.
     bool begin(TwoWire& wire = Wire, uint8_t addr = DEFAULT_ADDRESS);
 
-    // Read one sample (pressure in Pa). For this gauge sensor, baroAlt_m = NAN, temp_C = NAN.
-    SDBaroSample readSample();
+    // Non-blocking read: if device is busy/unavailable, returns NANs quickly
+    SDBaroSample readSample(uint32_t budgetMs = 5);
 
-    // Optional: expose last status if you want external checks
-    int lastStatus();
+    // Health helpers
+    bool isReady();
+    void markFailed();        // external signal (optional)
+    bool reinit();            // quick reinit attempt (no backoff)
+    int  lastStatus();        // last status byte read
 }

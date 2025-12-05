@@ -17,12 +17,124 @@
 #include "sleep.h"
 #include "target_specific.h"
 #include <Throttle.h>
-#include "ICM_20948.h"
 #include "SDLogger.h"
 #include "modules/Telemetry/Sensor/ImuProvider.h"
 #include "modules/Telemetry/Sensor/MicroPressureProvider.h"
 
 PositionModule *positionModule;
+
+
+struct SensorHealth {
+    bool     ready      = false;
+    uint32_t lastOkMs   = 0;
+    uint32_t lastFailMs = 0;
+    uint8_t  failCount  = 0;
+};
+
+static SensorHealth imuHealth, baroHealth;
+
+// Exponential backoff helper
+static uint32_t backoffMs(uint8_t failCount, uint32_t base = 100, uint8_t maxShift = 5) {
+    uint8_t shift = (failCount > maxShift) ? maxShift : failCount;
+    return base << shift; // 100,200,400,800,1600,3200...
+}
+
+// Non-blocking, time-budgeted IMU read
+static bool readImuWithBudget(SDImuSample &out, uint32_t budgetMs = 5) {
+    const uint32_t start = millis();
+
+    if (!ImuProvider::isReady()) ImuProvider::begin();
+
+    out = ImuProvider::readSample(); // returns NANs if not ready
+    const uint32_t elapsed = millis() - start;
+
+    // Success path: any non-NAN accelerometer value qualifies
+    if (!isnan(out.ax_mg) && !isnan(out.gx_dps)) {
+        imuHealth.ready     = true;
+        imuHealth.lastOkMs  = millis();
+        imuHealth.failCount = 0;
+        return true;
+    }
+
+    // Failure or slow path
+    imuHealth.ready      = false;
+    imuHealth.lastFailMs = millis();
+    imuHealth.failCount++;
+    ImuProvider::markFailed();
+
+    // Budget guard (we can log now; the slow read already happened)
+    (void)budgetMs; // IMU reads are typically fast; just mark failure
+    return false;
+}
+
+// Non-blocking, time-budgeted BARO read
+static bool readBaroWithBudget(SDBaroSample &out, uint32_t budgetMs = 5) {
+    const uint32_t start = millis();
+
+    out = MicroPressureProvider::readSample(budgetMs);
+    const uint32_t elapsed = millis() - start;
+
+    // Valid if pressure is finite and not NAN
+    if (!isnan(out.pressure_Pa)) {
+        baroHealth.ready     = true;
+        baroHealth.lastOkMs  = millis();
+        baroHealth.failCount = 0;
+        return true;
+    }
+
+    // If sensor is busy or failed, mark unhealthy
+    baroHealth.ready      = false;
+    baroHealth.lastFailMs = millis();
+    baroHealth.failCount++;
+    MicroPressureProvider::markFailed();
+
+    return false;
+}
+
+// Try reinitializing sensors on backoff cadence (non-blocking)
+
+static void maybeReinitImu() {
+    if (imuHealth.ready) return;
+    uint32_t now = millis();
+    if (now - imuHealth.lastFailMs >= backoffMs(imuHealth.failCount)) {
+
+        // 1) Attempt bus recovery first
+        ImuProvider::recoverI2CBus();
+
+        // 2) Try re-begin (address fallback occurs inside begin)
+        if (ImuProvider::begin()) {
+            // 3) Optional WHO_AM_I probe & soft reset if needed
+            uint8_t who = 0xFF;
+            if (!ImuProvider::probeWhoAmI(who) || who == 0xFF) {
+                // WHO_AM_I unreliable; try soft reset
+                ImuProvider::softReset();
+            }
+
+            imuHealth.ready     = true;
+            imuHealth.failCount = 0;
+            imuHealth.lastOkMs  = now;
+            Serial.println("[IMU] recovered");
+        } else {
+            imuHealth.lastFailMs = now;
+        }
+    }
+}
+
+static void maybeReinitBaro() {
+    if (baroHealth.ready) return;
+    uint32_t now = millis();
+    if (now - baroHealth.lastFailMs >= backoffMs(baroHealth.failCount)) {
+        if (MicroPressureProvider::reinit()) {
+            baroHealth.ready     = true;
+            baroHealth.failCount = 0;
+            baroHealth.lastOkMs  = now;
+            Serial.println("[MicroPressure] recovered");
+        } else {
+            baroHealth.lastFailMs = now;
+        }
+    }
+}
+
 
 PositionModule::PositionModule()
     : ProtobufModule("position", meshtastic_PortNum_POSITION_APP, &meshtastic_Position_msg), concurrency::OSThread("Position")
@@ -125,26 +237,6 @@ void PositionModule::alterReceivedProtobuf(meshtastic_MeshPacket &mp, meshtastic
     }
 }
 extern GPS *gps;
-extern ICM_20948_I2C imu;
-
-
-static SDImuSample makeImuSample()
-{
-  SDImuSample s;
-  imu.getAGMT();            // updates imu.agmt in one shot  (your driver)
-  s.ax_mg = imu.accX();     // mg
-  s.ay_mg = imu.accY();
-  s.az_mg = imu.accZ();
-  s.gx_dps = imu.gyrX();    // deg/s
-  s.gy_dps = imu.gyrY();
-  s.gz_dps = imu.gyrZ();
-  s.mx_uT = imu.magX();     // microtesla
-  s.my_uT = imu.magY();
-  s.mz_uT = imu.magZ();
-  s.t_C   = imu.temp();     // °C
-  return s;
-}
-
 
 void PositionModule::trySetRtc(meshtastic_Position p, bool isLocal, bool forceUpdate)
 {
@@ -357,6 +449,12 @@ void PositionModule::sendOurPosition()
     SDLogger::begin(); 
     ImuProvider::begin();
     MicroPressureProvider::begin(Wire, DEFAULT_ADDRESS);
+
+    
+    imuHealth.ready  = ImuProvider::isReady();
+    baroHealth.ready = MicroPressureProvider::isReady();
+
+
     bool requestReplies = currentGeneration != radioGeneration;
     currentGeneration = radioGeneration;
 
@@ -438,14 +536,12 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
     }
 }
 
-#define RUNONCE_INTERVAL 200; // currently allows it it to log every 250 ms or 4 times per second
+#define RUNONCE_INTERVAL 200 // currently allows it it to log every 250 ms or 4 times per second
 
 int32_t PositionModule::runOnce()
 {
     static uint32_t lastLogMs = 0;
     const uint32_t logIntervalMs = 50; // 0.05 seconds
-
-    SDLogger::begin();
 
     if (sleepOnNextExecution == true) {
         sleepOnNextExecution = false;
@@ -526,14 +622,22 @@ int32_t PositionModule::runOnce()
         fix.sats     = localPosition.sats_in_view;
         fix.unixTime = localPosition.time;
 
-        SDImuSample imuSample = ImuProvider::readSample();
-        SDBaroSample baroSample = MicroPressureProvider::readSample();
 
+        SDImuSample imuSample;
+        SDBaroSample baroSample;
+
+        // Non-blocking reads (best effort within small budget)
+        readImuWithBudget(imuSample, /*budgetMs=*/5);
+        readBaroWithBudget(baroSample, /*budgetMs=*/5);
+
+        // Log immediately regardless of sensor state; NANs are OK
         SDLogger::log(fix, imuSample, baroSample);
 
-        LOG_INFO("Logged position+IMU+Baro to SD card at %u ms", now);
+        LOG_DEBUG("Logged position+IMU+Baro to SD card at %u ms", now);
     }
-
+    
+    maybeReinitImu();
+    maybeReinitBaro();
 
     return RUNONCE_INTERVAL; // to save power only wake for our callback occasionally
 }
