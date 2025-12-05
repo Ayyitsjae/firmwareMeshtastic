@@ -373,7 +373,7 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
     prevPacketId = p->id;
 
     // ---------- NEW: log to SD card ----------
-    SDGpsFix fix{};
+    /*SDGpsFix fix{};
     fix.lat_i = localPosition.latitude_i;
     fix.lon_i = localPosition.longitude_i;
 
@@ -387,7 +387,7 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
     fix.sats     = localPosition.sats_in_view;
     fix.unixTime = localPosition.time;   // this is already set in allocPositionPacket() using RTC/GPS time or 0
 
-    SDLogger::log(fix);
+    SDLogger::log(fix); */
     // -----------------------------------------
 
     if (channel == 0)
@@ -417,6 +417,11 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
 
 int32_t PositionModule::runOnce()
 {
+    static uint32_t lastLogMs = 0;
+    const uint32_t logIntervalMs = 15000; // 15 seconds
+
+    SDLogger::begin();
+
     if (sleepOnNextExecution == true) {
         sleepOnNextExecution = false;
         uint32_t nightyNightMs = Default::getConfiguredOrDefaultMs(config.position.position_broadcast_secs);
@@ -483,6 +488,21 @@ int32_t PositionModule::runOnce()
             }
         }
     }
+    
+    if (now - lastLogMs >= logIntervalMs) {
+        lastLogMs = now;
+
+        SDGpsFix fix{};
+        fix.lat_i = localPosition.latitude_i;
+        fix.lon_i = localPosition.longitude_i;
+        fix.alt_m = localPosition.has_altitude_hae && localPosition.altitude_hae ? localPosition.altitude_hae : localPosition.altitude;
+        fix.sats = localPosition.sats_in_view;
+        fix.unixTime = localPosition.time;
+
+        SDLogger::log(fix);
+        LOG_INFO("Logged position to SD card at %u ms", now);
+    }
+
 
     return RUNONCE_INTERVAL; // to save power only wake for our callback occasionally
 }
@@ -554,10 +574,8 @@ void PositionModule::sendGeoText(NodeNum dest, uint8_t channel)
 
     // Example format:
     // "LAT 12.3456789, LON -98.7654321, ALT 123m, DYN Airborne<4g> (0x08)"
-    snprintf(msg, sizeof(msg),
-             "LAT %.7f, LON %.7f, ALT %dm, DYN %s (0x%02X)",
-             lat, lon, alt, dynStr, dynCode);
-
+    snprintf(msg, sizeof(msg), "https://www.google.com/maps?q=%.7f,%.7f", lat, lon);
+    
     p->decoded.payload.size = strlen(msg);
     memcpy(p->decoded.payload.bytes, msg, p->decoded.payload.size);
 
