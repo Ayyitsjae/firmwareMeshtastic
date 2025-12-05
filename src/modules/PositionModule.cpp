@@ -40,7 +40,9 @@ static uint32_t backoffMs(uint8_t failCount, uint32_t base = 100, uint8_t maxShi
 }
 
 // Non-blocking, time-budgeted IMU read
-static bool readImuWithBudget(SDImuSample &out, uint32_t budgetMs = 5) {
+
+static bool readImuWithBudget(SDImuSample &out, uint32_t budgetMs = 5)
+{
     const uint32_t start = millis();
 
     if (!ImuProvider::isReady()) ImuProvider::begin();
@@ -48,24 +50,25 @@ static bool readImuWithBudget(SDImuSample &out, uint32_t budgetMs = 5) {
     out = ImuProvider::readSample(); // returns NANs if not ready
     const uint32_t elapsed = millis() - start;
 
-    // Success path: any non-NAN accelerometer value qualifies
-    if (!isnan(out.ax_mg) && !isnan(out.gx_dps)) {
+    // Success path: any non-NAN accel OR gyro value qualifies
+    if (!isnan(out.ax_mg) || !isnan(out.gx_dps)) {
         imuHealth.ready     = true;
         imuHealth.lastOkMs  = millis();
         imuHealth.failCount = 0;
         return true;
     }
 
-    // Failure or slow path
+    // Failure path (once)
     imuHealth.ready      = false;
     imuHealth.lastFailMs = millis();
     imuHealth.failCount++;
     ImuProvider::markFailed();
 
-    // Budget guard (we can log now; the slow read already happened)
-    (void)budgetMs; // IMU reads are typically fast; just mark failure
+    // Optional: light guard if sampling runs long
+    (void)budgetMs;
     return false;
 }
+
 
 // Non-blocking, time-budgeted BARO read
 static bool readBaroWithBudget(SDBaroSample &out, uint32_t budgetMs = 5) {
@@ -98,18 +101,14 @@ static void maybeReinitImu() {
     uint32_t now = millis();
     if (now - imuHealth.lastFailMs >= backoffMs(imuHealth.failCount)) {
 
-        // 1) Attempt bus recovery first
         ImuProvider::recoverI2CBus();
+        delay(10); // NEW: let the IMU power settle
 
-        // 2) Try re-begin (address fallback occurs inside begin)
         if (ImuProvider::begin()) {
-            // 3) Optional WHO_AM_I probe & soft reset if needed
             uint8_t who = 0xFF;
             if (!ImuProvider::probeWhoAmI(who) || who == 0xFF) {
-                // WHO_AM_I unreliable; try soft reset
                 ImuProvider::softReset();
             }
-
             imuHealth.ready     = true;
             imuHealth.failCount = 0;
             imuHealth.lastOkMs  = now;
@@ -559,11 +558,6 @@ int32_t PositionModule::runOnce()
     uint32_t intervalMs = Default::getConfiguredOrDefaultMsScaled(config.position.position_broadcast_secs,
                                                                   default_broadcast_interval_secs, numOnlineNodes);
     uint32_t msSinceLastSend = now - lastGpsSend;
-    // Only send packets if the channel util. is less than 25% utilized or we're a tracker with less than 40% utilized.
-    if (!airTime->isTxAllowedChannelUtil(config.device.role != meshtastic_Config_DeviceConfig_Role_TRACKER &&
-                                         config.device.role != meshtastic_Config_DeviceConfig_Role_TAK_TRACKER)) {
-        return RUNONCE_INTERVAL;
-    }
 
     if (lastGpsSend == 0 || msSinceLastSend >= intervalMs) {
         if (nodeDB->hasValidPosition(node)) {
@@ -749,9 +743,21 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     const char *dynStr = gps->getDynamicModelString();
     uint8_t dynCode   = gps->getDynamicModel();
 
+    // Try non-blocking sensor reads (best-effort). NANs are acceptable and will print as "nan".
+    SDImuSample imuSample;
+    SDBaroSample baroSample;
+    readImuWithBudget(imuSample, /*budgetMs=*/5);
+    readBaroWithBudget(baroSample, /*budgetMs=*/5);
+
+    // Include a few representative sensor values in the debug text:
+    // - Barometer: pressure in Pa
+    // - IMU: accel in mg (ax/ay/az) and gyro in dps (gx/gy/gz)
     snprintf(msg, sizeof(msg),
-             "GPS: fixQ=%u, sats=%u, PDOP=%u",
-             fixQ, sats, pdop);
+             "GPS: fixQ=%u, sats=%u, PDOP=%u, DYN=%s (0x%02X), Baro=%.1fPa, IMU=acc[%.1f,%.1f,%.1f]mg gyro[%.1f,%.1f,%.1f]dps",
+             fixQ, sats, pdop, dynStr, dynCode,
+             (double)baroSample.pressure_Pa,
+             (double)imuSample.ax_mg, (double)imuSample.ay_mg, (double)imuSample.az_mg,
+             (double)imuSample.gx_dps, (double)imuSample.gy_dps, (double)imuSample.gz_dps);
 
     p->decoded.payload.size = strlen(msg);
     memcpy(p->decoded.payload.bytes, msg, p->decoded.payload.size);
