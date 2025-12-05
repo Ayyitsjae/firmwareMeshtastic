@@ -17,7 +17,10 @@
 #include "sleep.h"
 #include "target_specific.h"
 #include <Throttle.h>
+#include "ICM_20948.h"
 #include "SDLogger.h"
+#include "modules/Telemetry/Sensor/ImuProvider.h"
+#include "modules/Telemetry/Sensor/MicroPressureProvider.h"
 
 PositionModule *positionModule;
 
@@ -122,6 +125,26 @@ void PositionModule::alterReceivedProtobuf(meshtastic_MeshPacket &mp, meshtastic
     }
 }
 extern GPS *gps;
+extern ICM_20948_I2C imu;
+
+
+static SDImuSample makeImuSample()
+{
+  SDImuSample s;
+  imu.getAGMT();            // updates imu.agmt in one shot  (your driver)
+  s.ax_mg = imu.accX();     // mg
+  s.ay_mg = imu.accY();
+  s.az_mg = imu.accZ();
+  s.gx_dps = imu.gyrX();    // deg/s
+  s.gy_dps = imu.gyrY();
+  s.gz_dps = imu.gyrZ();
+  s.mx_uT = imu.magX();     // microtesla
+  s.my_uT = imu.magY();
+  s.mz_uT = imu.magZ();
+  s.t_C   = imu.temp();     // °C
+  return s;
+}
+
 
 void PositionModule::trySetRtc(meshtastic_Position p, bool isLocal, bool forceUpdate)
 {
@@ -332,6 +355,8 @@ meshtastic_MeshPacket *PositionModule::allocAtakPli()
 void PositionModule::sendOurPosition()
 {
     SDLogger::begin(); 
+    ImuProvider::begin();
+    MicroPressureProvider::begin(Wire, DEFAULT_ADDRESS);
     bool requestReplies = currentGeneration != radioGeneration;
     currentGeneration = radioGeneration;
 
@@ -413,12 +438,12 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
     }
 }
 
-#define RUNONCE_INTERVAL 5000;
+#define RUNONCE_INTERVAL 200; // currently allows it it to log every 250 ms or 4 times per second
 
 int32_t PositionModule::runOnce()
 {
     static uint32_t lastLogMs = 0;
-    const uint32_t logIntervalMs = 15000; // 15 seconds
+    const uint32_t logIntervalMs = 50; // 0.05 seconds
 
     SDLogger::begin();
 
@@ -489,18 +514,24 @@ int32_t PositionModule::runOnce()
         }
     }
     
+
     if (now - lastLogMs >= logIntervalMs) {
         lastLogMs = now;
 
         SDGpsFix fix{};
-        fix.lat_i = localPosition.latitude_i;
-        fix.lon_i = localPosition.longitude_i;
-        fix.alt_m = localPosition.has_altitude_hae && localPosition.altitude_hae ? localPosition.altitude_hae : localPosition.altitude;
-        fix.sats = localPosition.sats_in_view;
+        fix.lat_i    = localPosition.latitude_i;
+        fix.lon_i    = localPosition.longitude_i;
+        fix.alt_m    = localPosition.has_altitude_hae && localPosition.altitude_hae
+                        ? localPosition.altitude_hae : localPosition.altitude;
+        fix.sats     = localPosition.sats_in_view;
         fix.unixTime = localPosition.time;
 
-        SDLogger::log(fix);
-        LOG_INFO("Logged position to SD card at %u ms", now);
+        SDImuSample imuSample = ImuProvider::readSample();
+        SDBaroSample baroSample = MicroPressureProvider::readSample();
+
+        SDLogger::log(fix, imuSample, baroSample);
+
+        LOG_INFO("Logged position+IMU+Baro to SD card at %u ms", now);
     }
 
 
