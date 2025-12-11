@@ -20,9 +20,14 @@
 #include "SDLogger.h"
 #include "modules/Telemetry/Sensor/ImuProvider.h"
 #include "modules/Telemetry/Sensor/MicroPressureProvider.h"
+#include <SD.h>
 
 PositionModule *positionModule;
 
+static uint32_t BOOT_START_MS = 0;
+static uint32_t SD_READY_MS   = 0;
+static bool BOOT_TIMES_WRITTEN = false;
+static const char* BOOT_LOG_PATH = "/boot_times.csv";
 
 struct SensorHealth {
     bool     ready      = false;
@@ -138,6 +143,7 @@ static void maybeReinitBaro() {
 PositionModule::PositionModule()
     : ProtobufModule("position", meshtastic_PortNum_POSITION_APP, &meshtastic_Position_msg), concurrency::OSThread("Position")
 {
+    BOOT_START_MS = millis();
     precision = 0;        // safe starting value
     isPromiscuous = true; // We always want to update our nodedb, even if we are sniffing on others
     nodeStatusObserver.observe(&nodeStatus->onNewStatus);
@@ -445,7 +451,13 @@ meshtastic_MeshPacket *PositionModule::allocAtakPli()
 
 void PositionModule::sendOurPosition()
 {
-    SDLogger::begin(); 
+    SDLogger::begin();
+
+    if (SD_READY_MS == 0) 
+    {
+        SD_READY_MS = millis();
+    }
+
     ImuProvider::begin();
     MicroPressureProvider::begin(Wire, DEFAULT_ADDRESS);
 
@@ -535,7 +547,7 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
     }
 }
 
-#define RUNONCE_INTERVAL 200 // currently allows it it to log every 250 ms or 4 times per second
+#define RUNONCE_INTERVAL 175 // currently allows it it to log every 250 ms or 4 times per second
 
 int32_t PositionModule::runOnce()
 {
@@ -628,6 +640,44 @@ int32_t PositionModule::runOnce()
         SDLogger::log(fix, imuSample, baroSample);
 
         LOG_DEBUG("Logged position+IMU+Baro to SD card at %u ms", now);
+
+        if (!BOOT_TIMES_WRITTEN) {
+            const uint32_t logging_started_ms   = now;
+            const uint32_t total_boot_to_log_ms = logging_started_ms - BOOT_START_MS;
+
+            // Check if the file already has our header (even if non-empty)
+            bool hasHeader = false;
+            File rf = SD.open(BOOT_LOG_PATH, FILE_READ);
+            if (rf) {
+                char firstLine[128] = {0};
+                size_t n = rf.readBytesUntil('\n', firstLine, sizeof(firstLine) - 1);
+                rf.close();
+                if (n > 0 && firstLine[n - 1] == '\r') firstLine[n - 1] = '\0';
+                hasHeader = (strncmp(firstLine,
+                    "boot_start_ms,sd_ready_ms,logging_started_ms,total_boot_to_log_ms", 68) == 0)
+                    || (strncmp(firstLine,
+                    "BootStart(ms),SDReady(ms),FirstLog(ms),BootToLog(ms)", 53) == 0);
+            }
+
+            // Append the entry; add comment + header if missing
+            File f = SD.open(BOOT_LOG_PATH, FILE_APPEND);
+            if (f) {
+                if (!hasHeader || f.size() == 0) {
+                    f.println("# Boot timing metrics (milliseconds since CPU reset)");
+                    f.println("boot_start_ms,sd_ready_ms,logging_started_ms,total_boot_to_log_ms");
+                }
+                f.printf("%lu,%lu,%lu,%lu\n",
+                        (unsigned long)BOOT_START_MS,
+                        (unsigned long)SD_READY_MS,
+                        (unsigned long)logging_started_ms,
+                        (unsigned long)total_boot_to_log_ms);
+                f.flush();
+                f.close();
+                BOOT_TIMES_WRITTEN = true;  // write only once per boot
+            } else {
+                LOG_DEBUG("Boot timing file open failed; will retry");
+            }
+        }
     }
     
     maybeReinitImu();
