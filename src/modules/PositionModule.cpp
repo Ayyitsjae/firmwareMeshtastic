@@ -547,7 +547,7 @@ void PositionModule::sendOurPosition(NodeNum dest, bool wantReplies, uint8_t cha
     }
 }
 
-#define RUNONCE_INTERVAL 175 // currently allows it it to log every 250 ms or 4 times per second
+#define RUNONCE_INTERVAL 175 // currently allows it it to log every 222.5 ms or 4.5 times per second
 
 int32_t PositionModule::runOnce()
 {
