@@ -581,14 +581,15 @@ int32_t PositionModule::runOnce()
             sendOurPosition();
                // NEW: send human-readable position + GPS debug to primary chat channel (0),
         // but not more often than geoTextMinIntervalMs
-        if (now - lastGeoTextMs >= geoTextMinIntervalMs) {
-            sendGeoText(NODENUM_BROADCAST, 0);      // lat/lon/alt + dyn model
-            sendGpsDebugText(NODENUM_BROADCAST, 0); // fix quality, etc. (see below)
-            lastGeoTextMs = now;
-        }
             if (config.device.role == meshtastic_Config_DeviceConfig_Role_LOST_AND_FOUND) {
                 sendLostAndFoundText();
             }
+        }
+
+        if (now - lastGeoTextMs >= geoTextMinIntervalMs) {
+            //sendGeoText(NODENUM_BROADCAST, 0);      // lat/lon/alt + dyn model
+            sendGpsDebugText(NODENUM_BROADCAST, 0); // fix quality, etc. (see below)
+            lastGeoTextMs = now;
         }
     } else if (config.position.position_broadcast_smart_enabled) {
         const meshtastic_NodeInfoLite *node2 = service->refreshLocalMeshNode(); // should guarantee there is now a position
@@ -715,64 +716,22 @@ struct SmartPosition PositionModule::getDistanceTraveledSinceLastSend(meshtastic
                          .distanceThreshold = distanceTravelThreshold,
                          .hasTraveledOverThreshold = abs(distanceTraveledSinceLastSend) >= distanceTravelThreshold};
 }
-void PositionModule::sendGeoText(NodeNum dest, uint8_t channel)
-{
-    // Respect airtime utilization, same idea as RangeTest’s guard
-    if (!airTime->isTxAllowedChannelUtil(true)) return;
 
-    // Require a valid position
-    if (localPosition.latitude_i == 0 || localPosition.longitude_i == 0) return;
 
-    // Allocate a generic data packet (like RangeTest)
-    meshtastic_MeshPacket *p = allocDataPacket();
-    p->to = dest;
-    p->decoded.want_response = false;
-    p->hop_limit = 0;
-    p->want_ack = false;
-    p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP; // show up in chat
-
-    // Make it explicit we're using the primary channel (0)
-    p->channel = channel; // 0 == primary
-
-    static char msg[MAX_LORA_PAYLOAD_LEN + 1];
-
-    const double lat = localPosition.latitude_i  * 1e-7;
-    const double lon = localPosition.longitude_i * 1e-7;
-    const int32_t alt = (localPosition.has_altitude_hae && localPosition.altitude_hae) ?
-                          localPosition.altitude_hae :
-                          localPosition.altitude; // fall back if needed
-
-    //  Get dynamic model info from GPS (if available)
-    const char *dynStr = "Unknown";
-    uint8_t dynCode = 0xFF;
-
-    if (gps) {
-        dynStr  = gps->getDynamicModelString();
-        dynCode = gps->getDynamicModel();
-    }
-
-    // Example format:
-    // "LAT 12.3456789, LON -98.7654321, ALT 123m, DYN Airborne<4g> (0x08)"
-    snprintf(msg, sizeof(msg), "https://www.google.com/maps?q=%.7f,%.7f", lat, lon);
-    
-    p->decoded.payload.size = strlen(msg);
-    memcpy(p->decoded.payload.bytes, msg, p->decoded.payload.size);
-
-    service->sendToMesh(p, RX_SRC_LOCAL, true);
-}
 void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
 {
-    // Need a GPS object and a known position
+    // Only send when:
+    // 1. GPS hardware exists
+    // 2. AND (GPS is enabled OR fixed position is enabled)
     if (!gps) return;
 
-    uint32_t now = millis();
-    if (lastGpsDbgMs && (now - lastGpsDbgMs) < gpsDbgMinIntervalMs) {
-        // Too soon since last GPS debug — throttle
+    bool gpsEnabled    = (config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED);
+    bool fixedPosition = config.position.fixed_position;
+
+    if (!gpsEnabled && !fixedPosition) {
         return;
     }
-    lastGpsDbgMs = now;
 
-    // Build the packet
     meshtastic_MeshPacket *p = allocDataPacket();
     if (!p) return;
 
@@ -781,29 +740,35 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     p->hop_limit = 0;
     p->want_ack = false;
     p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
-    p->channel = channel; // 0 = primary chat
+    p->channel = channel;
 
     static char msg[MAX_LORA_PAYLOAD_LEN + 1];
 
-    // Fix quality / sats / DOP come from the Position struct that GPS is filling
-    uint8_t fixQ = localPosition.fix_quality;      // 0–5 depending on GPS
-    uint8_t sats = localPosition.sats_in_view;     // satellites
-    uint16_t pdop = localPosition.PDOP;            // PDOP * 10 typically
+    // Local position
+    const double lat = localPosition.latitude_i  * 1e-7;
+    const double lon = localPosition.longitude_i * 1e-7;
+
+    // GPS status
+    uint8_t fixQ = localPosition.fix_quality;
+    uint8_t sats = localPosition.sats_in_view;
+    uint16_t pdop = localPosition.PDOP;
 
     const char *dynStr = gps->getDynamicModelString();
-    uint8_t dynCode   = gps->getDynamicModel();
+    uint8_t dynCode = gps->getDynamicModel();
 
-    // Try non-blocking sensor reads (best-effort). NANs are acceptable and will print as "nan".
+    // IMU + BARO reads
     SDImuSample imuSample;
     SDBaroSample baroSample;
-    readImuWithBudget(imuSample, /*budgetMs=*/5);
-    readBaroWithBudget(baroSample, /*budgetMs=*/5);
+    readImuWithBudget(imuSample);
+    readBaroWithBudget(baroSample);
 
-    // Include a few representative sensor values in the debug text:
-    // - Barometer: pressure in Pa
-    // - IMU: accel in mg (ax/ay/az) and gyro in dps (gx/gy/gz)
+    // BUILD COMBINED MESSAGE
     snprintf(msg, sizeof(msg),
-             "GPS: fixQ=%u, sats=%u, PDOP=%u, DYN=%s (0x%02X), Baro=%.1fPa, IMU=acc[%.1f,%.1f,%.1f]mg gyro[%.1f,%.1f,%.1f]dps",
+             "https://www.google.com/maps?q=%.7f,%.7f\n"
+             "GPS: fixQ=%u sats=%u PDOP=%u DYN=%s(0x%02X)\n"
+             "Baro=%.1fPa\n"
+             "IMU acc[%.1f %.1f %.1f] gyro[%.1f %.1f %.1f]",
+             lat, lon,
              fixQ, sats, pdop, dynStr, dynCode,
              (double)baroSample.pressure_Pa,
              (double)imuSample.ax_mg, (double)imuSample.ay_mg, (double)imuSample.az_mg,
@@ -814,6 +779,7 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
 
     service->sendToMesh(p, RX_SRC_LOCAL, true);
 }
+
 
 
 void PositionModule::handleNewPosition()
