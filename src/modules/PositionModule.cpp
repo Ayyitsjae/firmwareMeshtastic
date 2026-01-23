@@ -586,11 +586,6 @@ int32_t PositionModule::runOnce()
             }
         }
 
-        if (now - lastGeoTextMs >= geoTextMinIntervalMs) {
-            //sendGeoText(NODENUM_BROADCAST, 0);      // lat/lon/alt + dyn model
-            sendGpsDebugText(NODENUM_BROADCAST, 0); // fix quality, etc. (see below)
-            lastGeoTextMs = now;
-        }
     } else if (config.position.position_broadcast_smart_enabled) {
         const meshtastic_NodeInfoLite *node2 = service->refreshLocalMeshNode(); // should guarantee there is now a position
 
@@ -615,6 +610,12 @@ int32_t PositionModule::runOnce()
                 lastGpsLongitude = node->position.longitude_i;
             }
         }
+    }
+    
+    if (now - lastGeoTextMs >= geoTextMinIntervalMs) {
+        //sendGeoText(NODENUM_BROADCAST, 0);      // lat/lon/alt + dyn model
+        sendGpsDebugText(NODENUM_BROADCAST, 0); // fix quality, etc. (see below)
+        lastGeoTextMs = now;
     }
     
 
@@ -718,17 +719,23 @@ struct SmartPosition PositionModule::getDistanceTraveledSinceLastSend(meshtastic
 }
 
 
+
 void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
 {
-    // Only send when:
-    // 1. GPS hardware exists
-    // 2. AND (GPS is enabled OR fixed position is enabled)
-    if (!gps) return;
+    const bool fixedPosition = config.position.fixed_position;
 
-    bool gpsEnabled    = (config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED);
-    bool fixedPosition = config.position.fixed_position;
+#if !MESHTASTIC_EXCLUDE_GPS
+    const bool gpsActive =
+        (config.position.gps_mode ==
+             meshtastic_Config_PositionConfig_GpsMode_ENABLED) &&
+        gps &&
+        gps->isConnected();
+#else
+    const bool gpsActive = false;
+#endif
 
-    if (!gpsEnabled && !fixedPosition) {
+    // ✅ ONLY allow send if fixed position OR GPS is enabled + connected
+    if (!fixedPosition && !gpsActive) {
         return;
     }
 
@@ -744,25 +751,21 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
 
     static char msg[MAX_LORA_PAYLOAD_LEN + 1];
 
-    // Local position
     const double lat = localPosition.latitude_i  * 1e-7;
     const double lon = localPosition.longitude_i * 1e-7;
 
-    // GPS status
-    uint8_t fixQ = localPosition.fix_quality;
-    uint8_t sats = localPosition.sats_in_view;
+    uint8_t fixQ  = localPosition.fix_quality;
+    uint8_t sats  = localPosition.sats_in_view;
     uint16_t pdop = localPosition.PDOP;
 
-    const char *dynStr = gps->getDynamicModelString();
-    uint8_t dynCode = gps->getDynamicModel();
+    const char *dynStr = gpsActive ? gps->getDynamicModelString() : "N/A";
+    uint8_t dynCode    = gpsActive ? gps->getDynamicModel() : 0;
 
-    // IMU + BARO reads
     SDImuSample imuSample;
     SDBaroSample baroSample;
     readImuWithBudget(imuSample);
     readBaroWithBudget(baroSample);
 
-    // BUILD COMBINED MESSAGE
     snprintf(msg, sizeof(msg),
              "https://www.google.com/maps?q=%.7f,%.7f\n"
              "GPS: fixQ=%u sats=%u PDOP=%u DYN=%s(0x%02X)\n"
@@ -779,8 +782,6 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
 
     service->sendToMesh(p, RX_SRC_LOCAL, true);
 }
-
-
 
 void PositionModule::handleNewPosition()
 {
