@@ -21,6 +21,9 @@
 #include "modules/Telemetry/Sensor/ImuProvider.h"
 #include "modules/Telemetry/Sensor/MicroPressureProvider.h"
 #include <SD.h>
+#include <math.h>
+#include <limits.h>
+
 
 PositionModule *positionModule;
 
@@ -734,8 +737,12 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     const bool gpsActive = false;
 #endif
 
-    // ✅ ONLY allow send if fixed position OR GPS is enabled + connected
-    if (!fixedPosition && !gpsActive) {
+    // ONLY allow send if fixed position OR GPS is enabled + connected
+    // If you want GPS-only, keep the next 'if (!gpsActive)' line.
+    // If you want the original behavior (fixed OR GPS), use:
+    // if (!fixedPosition && !gpsActive) { return; }
+    if (!gpsActive) {
+        // uncomment above for non-debugging
         return;
     }
 
@@ -754,9 +761,9 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     const double lat = localPosition.latitude_i  * 1e-7;
     const double lon = localPosition.longitude_i * 1e-7;
 
-    uint8_t fixQ  = localPosition.fix_quality;
-    uint8_t sats  = localPosition.sats_in_view;
-    uint16_t pdop = localPosition.PDOP;
+    uint8_t  fixQ  = localPosition.fix_quality;
+    uint8_t  sats  = localPosition.sats_in_view;
+    uint16_t pdop  = localPosition.PDOP;
 
     const char *dynStr = gpsActive ? gps->getDynamicModelString() : "N/A";
     uint8_t dynCode    = gpsActive ? gps->getDynamicModel() : 0;
@@ -766,16 +773,44 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     readImuWithBudget(imuSample);
     readBaroWithBudget(baroSample);
 
+    // --- NEW: Link line from cached RX metrics in MeshService ---
+    // (MeshService::handleFromRadio(...) is where we cache RSSI/SNR per RX) [2](https://stratostemp2-my.sharepoint.com/personal/jason_lee_stratospheres_net/Documents/Microsoft%20Copilot%20Chat%20Files/PositionModule.cpp)
+    char linkLine[64];
+    bool linkValid = (service && service->hasLastRxLink());
+
+    int16_t rssi = linkValid ? service->getLastRxRssi() : INT16_MIN;
+    float   snr  = linkValid ? service->getLastRxSnr()  : NAN;
+
+    if (!linkValid || rssi == INT16_MIN || isnan(snr)) {
+        if (rssi != INT16_MIN && isnan(snr)) {
+            snprintf(linkLine, sizeof(linkLine), "Link: RSSI=%ddBm SNR=N/A", (int)rssi);
+        } else if (rssi == INT16_MIN && !isnan(snr)) {
+            snprintf(linkLine, sizeof(linkLine), "Link: RSSI=N/A SNR=%.1fdB", (double)snr);
+        } else {
+            snprintf(linkLine, sizeof(linkLine), "Link: RSSI=N/A SNR=N/A");
+        }
+    } else {
+        // Clamp for display (sanity, avoids odd outliers)
+        int dispRssi = rssi < -140 ? -140 : (rssi > 0 ? 0 : rssi);
+        double dispSnr = snr;
+        if (dispSnr < -50) dispSnr = -50;
+        if (dispSnr >  50) dispSnr =  50;
+        snprintf(linkLine, sizeof(linkLine), "Link: RSSI=%ddBm SNR=%.1fdB", (int)dispRssi, dispSnr);
+    }
+
+    // --- Final message (Link line inserted between GPS and Baro) ---
     snprintf(msg, sizeof(msg),
-             "https://www.google.com/maps?q=%.7f,%.7f\n"
-             "GPS: fixQ=%u sats=%u PDOP=%u DYN=%s(0x%02X)\n"
-             "Baro=%.1fPa\n"
-             "IMU acc[%.1f %.1f %.1f] gyro[%.1f %.1f %.1f]",
-             lat, lon,
-             fixQ, sats, pdop, dynStr, dynCode,
-             (double)baroSample.pressure_Pa,
-             (double)imuSample.ax_mg, (double)imuSample.ay_mg, (double)imuSample.az_mg,
-             (double)imuSample.gx_dps, (double)imuSample.gy_dps, (double)imuSample.gz_dps);
+        "https://www.google.com/maps?q=%.7f,%.7f\n"
+        "GPS: fixQ=%u sats=%u PDOP=%u DYN=%s(0x%02X)\n"
+        //"%s\n"  // <--- Link line
+        "Baro=%.1fPa\n"
+        "IMU acc[%.1f %.1f %.1f] gyro[%.1f %.1f %.1f]",
+        lat, lon,
+        fixQ, sats, pdop, dynStr, dynCode,
+        linkLine,
+        (double)baroSample.pressure_Pa,
+        (double)imuSample.ax_mg, (double)imuSample.ay_mg, (double)imuSample.az_mg,
+        (double)imuSample.gx_dps, (double)imuSample.gy_dps, (double)imuSample.gz_dps);
 
     p->decoded.payload.size = strlen(msg);
     memcpy(p->decoded.payload.bytes, msg, p->decoded.payload.size);

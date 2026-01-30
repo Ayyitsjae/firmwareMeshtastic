@@ -3,7 +3,10 @@
 #include <Arduino.h>
 #include <assert.h>
 #include <string>
+#include <math.h>
+#include <limits.h>
 
+#include "MeshTypes.h"
 #include "GPSStatus.h"
 #include "MemoryPool.h"
 #include "MeshRadio.h"
@@ -190,6 +193,13 @@ class MeshService
 
     uint32_t GetTimeSinceMeshPacket(const meshtastic_MeshPacket *mp);
 
+    bool   hasLastRxLink() const { return lastRxValid; }
+    int16_t getLastRxRssi() const { return lastRxRssi; }
+    float   getLastRxSnr()  const { return lastRxSnr;  }
+    NodeNum  getLastRxFrom() const { return lastRxFrom; }
+    uint32_t getLastRxAgeSec() const;
+
+
   private:
 #if HAS_GPS
     /// Called when our gps position has changed - updates nodedb and sends Location message out into the mesh
@@ -200,6 +210,13 @@ class MeshService
     /// needs to keep the packet around it makes a copy
     int handleFromRadio(const meshtastic_MeshPacket *p);
     friend class RoutingModule;
+
+    int16_t lastRxRssi = INT16_MIN; // sentinel = invalid
+    float   lastRxSnr  = NAN;       // sentinel = invalid
+    bool    lastRxValid = false;
+    uint32_t lastRxTime = 0;
+    NodeNum lastRxFrom = 0;
+
 };
 
 extern MeshService *service;
