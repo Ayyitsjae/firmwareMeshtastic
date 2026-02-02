@@ -774,7 +774,7 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     readBaroWithBudget(baroSample);
 
     // --- NEW: Link line from cached RX metrics in MeshService ---
-    // (MeshService::handleFromRadio(...) is where we cache RSSI/SNR per RX) [2](https://stratostemp2-my.sharepoint.com/personal/jason_lee_stratospheres_net/Documents/Microsoft%20Copilot%20Chat%20Files/PositionModule.cpp)
+    // (MeshService::handleFromRadio(...) is where we cache RSSI/SNR per RX)
     char linkLine[64];
     bool linkValid = (service && service->hasLastRxLink());
 
