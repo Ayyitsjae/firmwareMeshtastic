@@ -766,6 +766,35 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     readImuWithBudget(imuSample);
     readBaroWithBudget(baroSample);
 
+<<<<<<< HEAD
+=======
+    // --- NEW: Link line from cached RX metrics in MeshService ---
+    // (MeshService::handleFromRadio(...) is where we cache RSSI/SNR per RX)
+    char linkLine[64];
+    bool linkValid = (service && service->hasLastRxLink());
+
+    int16_t rssi = linkValid ? service->getLastRxRssi() : INT16_MIN;
+    float   snr  = linkValid ? service->getLastRxSnr()  : NAN;
+
+    if (!linkValid || rssi == INT16_MIN || isnan(snr)) {
+        if (rssi != INT16_MIN && isnan(snr)) {
+            snprintf(linkLine, sizeof(linkLine), "Link: RSSI=%ddBm SNR=N/A", (int)rssi);
+        } else if (rssi == INT16_MIN && !isnan(snr)) {
+            snprintf(linkLine, sizeof(linkLine), "Link: RSSI=N/A SNR=%.1fdB", (double)snr);
+        } else {
+            snprintf(linkLine, sizeof(linkLine), "Link: RSSI=N/A SNR=N/A");
+        }
+    } else {
+        // Clamp for display (sanity, avoids odd outliers)
+        int dispRssi = rssi < -140 ? -140 : (rssi > 0 ? 0 : rssi);
+        double dispSnr = snr;
+        if (dispSnr < -50) dispSnr = -50;
+        if (dispSnr >  50) dispSnr =  50;
+        snprintf(linkLine, sizeof(linkLine), "Link: RSSI=%ddBm SNR=%.1fdB", (int)dispRssi, dispSnr);
+    }
+
+    // --- Final message (Link line inserted between GPS and Baro) ---
+>>>>>>> ae9bea2d1 (Removed comment from PositionModule.cpp)
     snprintf(msg, sizeof(msg),
              "https://www.google.com/maps?q=%.7f,%.7f\n"
              "GPS: fixQ=%u sats=%u PDOP=%u DYN=%s(0x%02X)\n"
