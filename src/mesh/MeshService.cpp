@@ -4,6 +4,7 @@
 #include "GPS.h"
 #endif
 
+#include <math.h>
 #include "../concurrency/Periodic.h"
 #include "BluetoothCommon.h" // needed for updateBatteryLevel, FIXME, eventually when we pull mesh out into a lib we shouldn't be whacking bluetooth from here
 #include "MeshService.h"
@@ -11,6 +12,7 @@
 #include "PowerFSM.h"
 #include "RTC.h"
 #include "TypeConversions.h"
+#include <limits.h>
 #include "main.h"
 #include "mesh-pb-constants.h"
 #include "meshUtils.h"
@@ -24,6 +26,10 @@
 #if ARCH_PORTDUINO
 #include "PortduinoGlue.h"
 #endif
+
+uint32_t MeshService::getLastRxAgeSec() const {
+    return lastRxTime ? (getTime() - lastRxTime) : UINT32_MAX;
+}
 
 /*
 receivedPacketQueue - this is a queue of messages we've received from the mesh, which we are keeping to deliver to the phone.
@@ -85,6 +91,29 @@ int MeshService::handleFromRadio(const meshtastic_MeshPacket *mp)
     powerFSM.trigger(EVENT_PACKET_FOR_PHONE); // Possibly keep the node from sleeping
 
     nodeDB->updateFrom(*mp); // update our DB state based off sniffing every RX packet from the radio
+    // --- Capture last RX metrics from NodeDB (safer across branches) ---
+    bool    valid   = false;
+    int16_t rssiTmp = INT16_MIN;
+    float   snrTmp  = NAN;
+
+    if (mp && nodeDB) {
+        if (auto *peer = nodeDB->getMeshNode(mp->from)) {
+            snrTmp = (float)peer->snr;
+
+            // RSSI is NOT stored in NodeInfoLite on this branch
+            // Leave rssiTmp as INT16_MIN unless your branch adds it
+            valid = !isnan(snrTmp);
+        }
+    }
+
+    if (valid) {
+        lastRxRssi  = rssiTmp;     // stays invalid unless you later add RSSI support
+        lastRxSnr   = snrTmp;
+        lastRxFrom  = mp->from;
+        lastRxTime  = getTime();
+        lastRxValid = true;
+    }
+
     bool isPreferredRebroadcaster = config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER;
     if (mp->which_payload_variant == meshtastic_MeshPacket_decoded_tag &&
         mp->decoded.portnum == meshtastic_PortNum_TELEMETRY_APP && mp->decoded.request_id > 0) {

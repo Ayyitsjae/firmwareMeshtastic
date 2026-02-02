@@ -21,6 +21,9 @@
 #include "modules/Telemetry/Sensor/ImuProvider.h"
 #include "modules/Telemetry/Sensor/MicroPressureProvider.h"
 #include <SD.h>
+#include <math.h>
+#include <limits.h>
+
 
 PositionModule *positionModule;
 
@@ -734,8 +737,12 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     const bool gpsActive = false;
 #endif
 
-    // ✅ ONLY allow send if fixed position OR GPS is enabled + connected
-    if (!fixedPosition && !gpsActive) {
+    // ONLY allow send if fixed position OR GPS is enabled + connected
+    // If you want GPS-only, keep the next 'if (!gpsActive)' line.
+    // If you want the original behavior (fixed OR GPS), use:
+    // if (!fixedPosition && !gpsActive) { return; }
+    if (!gpsActive) {
+        // uncomment above for non-debugging
         return;
     }
 
@@ -754,9 +761,9 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     const double lat = localPosition.latitude_i  * 1e-7;
     const double lon = localPosition.longitude_i * 1e-7;
 
-    uint8_t fixQ  = localPosition.fix_quality;
-    uint8_t sats  = localPosition.sats_in_view;
-    uint16_t pdop = localPosition.PDOP;
+    uint8_t  fixQ  = localPosition.fix_quality;
+    uint8_t  sats  = localPosition.sats_in_view;
+    uint16_t pdop  = localPosition.PDOP;
 
     const char *dynStr = gpsActive ? gps->getDynamicModelString() : "N/A";
     uint8_t dynCode    = gpsActive ? gps->getDynamicModel() : 0;
@@ -766,10 +773,8 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     readImuWithBudget(imuSample);
     readBaroWithBudget(baroSample);
 
-<<<<<<< HEAD
-=======
     // --- NEW: Link line from cached RX metrics in MeshService ---
-    // (MeshService::handleFromRadio(...) is where we cache RSSI/SNR per RX)
+    // (MeshService::handleFromRadio(...) is where we cache RSSI/SNR per RX) [2]
     char linkLine[64];
     bool linkValid = (service && service->hasLastRxLink());
 
@@ -794,17 +799,18 @@ void PositionModule::sendGpsDebugText(NodeNum dest, uint8_t channel)
     }
 
     // --- Final message (Link line inserted between GPS and Baro) ---
->>>>>>> ae9bea2d1 (Removed comment from PositionModule.cpp)
     snprintf(msg, sizeof(msg),
-             "https://www.google.com/maps?q=%.7f,%.7f\n"
-             "GPS: fixQ=%u sats=%u PDOP=%u DYN=%s(0x%02X)\n"
-             "Baro=%.1fPa\n"
-             "IMU acc[%.1f %.1f %.1f] gyro[%.1f %.1f %.1f]",
-             lat, lon,
-             fixQ, sats, pdop, dynStr, dynCode,
-             (double)baroSample.pressure_Pa,
-             (double)imuSample.ax_mg, (double)imuSample.ay_mg, (double)imuSample.az_mg,
-             (double)imuSample.gx_dps, (double)imuSample.gy_dps, (double)imuSample.gz_dps);
+        "https://www.google.com/maps?q=%.7f,%.7f\n"
+        "GPS: fixQ=%u sats=%u PDOP=%u DYN=%s(0x%02X)\n"
+        //"%s\n"  // <--- Link line
+        "Baro=%.1fPa\n"
+        "IMU acc[%.1f %.1f %.1f] gyro[%.1f %.1f %.1f]",
+        lat, lon,
+        fixQ, sats, pdop, dynStr, dynCode,
+        linkLine,
+        (double)baroSample.pressure_Pa,
+        (double)imuSample.ax_mg, (double)imuSample.ay_mg, (double)imuSample.az_mg,
+        (double)imuSample.gx_dps, (double)imuSample.gy_dps, (double)imuSample.gz_dps);
 
     p->decoded.payload.size = strlen(msg);
     memcpy(p->decoded.payload.bytes, msg, p->decoded.payload.size);
